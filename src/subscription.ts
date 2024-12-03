@@ -64,7 +64,7 @@ export class FirehoseSubscription extends FirehoseSubscriptionBase {
           // console.log(authoraka)
 
 
-        }
+        })
 
       })
       .map((create) => {
