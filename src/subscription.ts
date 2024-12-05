@@ -57,7 +57,7 @@ export class FirehoseSubscription extends FirehoseSubscriptionBase {
               indexedAt: new Date().toISOString(),
             }
           } else {
-            // console.log(`[DENY] User denied from cache: ${authorDid}`)
+            console.log(`[DENY] User denied from cache: ${authorDid}`)
             return null
           }
         }
@@ -81,7 +81,7 @@ export class FirehoseSubscription extends FirehoseSubscriptionBase {
               indexedAt: new Date().toISOString(),
             }
           } else {
-            // console.log(`[DENY] User denied: ${authorDid}, AKA: ${useraka}`)
+            console.log(`[DENY] User denied: ${authorDid}, AKA: ${useraka}`)
             cacheObject[authorDid] = { accept: false, time: Date.now() }
             return null
           }

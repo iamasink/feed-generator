@@ -1,0 +1,7 @@
+services:
+    feed-generator:
+        container_name: feed-generator
+        # image:
+        build: .
+        restart: unless-stopped
+        # environment:
