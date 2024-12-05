@@ -6,14 +6,12 @@ import {
 import { FirehoseSubscriptionBase, getOpsByType } from './util/subscription'
 import https from "node:https"
 
-export interface cache {
-  did: string
-  name: string
+export interface Cache {
+  accept: boolean
   time: number
 }
 
-
-const usercache: cache[] = []
+const cacheObject: Record<string, Cache> = {}
 
 export class FirehoseSubscription extends FirehoseSubscriptionBase {
   async handleEvent(evt: RepoEvent) {
@@ -31,44 +29,75 @@ export class FirehoseSubscription extends FirehoseSubscriptionBase {
     const postsToDelete = ops.posts.deletes.map((del) => del.uri)
     const postsToCreate = ops.posts.creates
       .filter((create) => {
-        // only alf-related posts
-        // console.log(create)
+        // Remove replies
+        if (create.record.reply) {
+          // console.log(`[SKIP] Post is a reply: ${create.uri}`)
+          return false
+        }
+
+        // Ignore posts not created in the last day
+        if (Date.parse(create.record.createdAt) < Date.now() - 86400000) {
+          // console.log(`[SKIP] Post is older than 1 day: ${create.uri}`)
+          return false
+        }
+
         const authorDid = create.author
+        const cachedData = cacheObject[authorDid]
 
-        const cacheddata = usercache.find(e => e.did == authorDid)
-
-        if (cacheddata) {
-          if (!cacheddata.name.endsWith(".bsky.social")) {
-            console.log("user added from cache", cacheddata)
+        if (cachedData) {
+          console.log(`[📋] Found cache for author ${authorDid}:`, cachedData)
+          if (cachedData.accept) {
+            console.log(`[✅📋] User added from cache: ${authorDid}`)
             return true
           } else {
+            // console.log(`[DENY] User denied from cache: ${authorDid}`)
             return false
           }
         }
-        https.get("https://plc.directory/" + authorDid, (res) => {
-          // console.log('statusCode:', res.statusCode)
-          // console.log('headers:', res.headers)
 
-          res.on('data', (d) => {
-            const userinfo = JSON.parse(d)
-            const useraka = (userinfo.alsoKnownAs as Array<string>)
-            usercache.push({ name: useraka[0], did: authorDid, time: Date.now() })
-            if (!useraka) return
-            if (!useraka[0].endsWith(".bsky.social")) {
-              console.log("user added", useraka)
-              return true
+        // console.log(`[FETCH] Fetching info for user: ${authorDid}`)
+        https.get(`https://plc.directory/${authorDid}`, (res) => {
+          if (res.statusCode != 200) {
+            console.log(`[HTTP] Response received for ${authorDid}. Status: ${res.statusCode}`)
+          }
+
+          let data = ''
+          res.on('data', (chunk) => {
+            data += chunk
+          })
+
+          res.on('end', () => {
+            try {
+              const userinfo = JSON.parse(data)
+              const useraka = userinfo.alsoKnownAs as string[]
+
+              if (!useraka || useraka.length === 0) {
+                console.log(`[❌] User has no "alsoKnownAs" field: ${authorDid}`)
+                cacheObject[authorDid] = { accept: false, time: Date.now() }
+                return false
+              }
+
+              if (!useraka[0].endsWith('.bsky.social') && !useraka[0].endsWith('.brid.gy')) {
+                console.log(`[✅] User added: ${authorDid}, AKA: ${useraka}`)
+                cacheObject[authorDid] = { accept: true, time: Date.now() }
+                return true
+              } else {
+                // console.log(`[DENY] User denied: ${authorDid}, AKA: ${useraka}`)
+                cacheObject[authorDid] = { accept: false, time: Date.now() }
+                return false
+              }
+            } catch (err) {
+              console.error(`[❗❗] Failed to parse user info for ${authorDid}:`, err)
+              return false
             }
           })
-          // console.log(res)
-          // const authoraka = res["alsoKnownAs"]
-          // console.log(authoraka)
-
-
+        }).on('error', (err) => {
+          console.error(`[❗❗] HTTP request failed for ${authorDid}:`, err)
         })
+
 
       })
       .map((create) => {
-        // map alf-related posts to a db row
         return {
           uri: create.uri,
           cid: create.cid,
