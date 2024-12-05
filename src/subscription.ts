@@ -27,18 +27,19 @@ export class FirehoseSubscription extends FirehoseSubscriptionBase {
     }
 
     const postsToDelete = ops.posts.deletes.map((del) => del.uri)
-    const postsToCreate = ops.posts.creates
-      .filter((create) => {
+
+    const postsToCreate = await Promise.all(
+      ops.posts.creates.map(async (create) => {
         // Remove replies
         if (create.record.reply) {
           // console.log(`[SKIP] Post is a reply: ${create.uri}`)
-          return false
+          return null
         }
 
         // Ignore posts not created in the last day
         if (Date.parse(create.record.createdAt) < Date.now() - 86400000) {
           // console.log(`[SKIP] Post is older than 1 day: ${create.uri}`)
-          return false
+          return null
         }
 
         const authorDid = create.author
@@ -48,62 +49,54 @@ export class FirehoseSubscription extends FirehoseSubscriptionBase {
           console.log(`[📋] Found cache for author ${authorDid}:`, cachedData)
           if (cachedData.accept) {
             console.log(`[✅📋] User added from cache: ${authorDid}`)
-            return true
+            console.log(`Cache Length: ${Object.keys(cacheObject).length}`)
+            cacheObject[authorDid].time = Date.now()
+            return {
+              uri: create.uri,
+              cid: create.cid,
+              indexedAt: new Date().toISOString(),
+            }
           } else {
             // console.log(`[DENY] User denied from cache: ${authorDid}`)
-            return false
+            return null
           }
         }
 
-        // console.log(`[FETCH] Fetching info for user: ${authorDid}`)
-        https.get(`https://plc.directory/${authorDid}`, (res) => {
-          if (res.statusCode != 200) {
-            console.log(`[HTTP] Response received for ${authorDid}. Status: ${res.statusCode}`)
+        try {
+          const userInfo = await fetchUserInfo(authorDid)
+          const useraka = userInfo?.alsoKnownAs
+
+          if (!useraka || useraka.length === 0) {
+            console.log(`[❌] User has no "alsoKnownAs" field: ${authorDid}`)
+            cacheObject[authorDid] = { accept: false, time: Date.now() }
+            return null
           }
 
-          let data = ''
-          res.on('data', (chunk) => {
-            data += chunk
-          })
-
-          res.on('end', () => {
-            try {
-              const userinfo = JSON.parse(data)
-              const useraka = userinfo.alsoKnownAs as string[]
-
-              if (!useraka || useraka.length === 0) {
-                console.log(`[❌] User has no "alsoKnownAs" field: ${authorDid}`)
-                cacheObject[authorDid] = { accept: false, time: Date.now() }
-                return false
-              }
-
-              if (!useraka[0].endsWith('.bsky.social') && !useraka[0].endsWith('.brid.gy')) {
-                console.log(`[✅] User added: ${authorDid}, AKA: ${useraka}`)
-                cacheObject[authorDid] = { accept: true, time: Date.now() }
-                return true
-              } else {
-                // console.log(`[DENY] User denied: ${authorDid}, AKA: ${useraka}`)
-                cacheObject[authorDid] = { accept: false, time: Date.now() }
-                return false
-              }
-            } catch (err) {
-              console.error(`[❗❗] Failed to parse user info for ${authorDid}:`, err)
-              return false
+          if (!useraka[0].endsWith('.bsky.social') && !useraka[0].endsWith('.brid.gy')) {
+            console.log(`[✅] User added: ${authorDid}, AKA: ${useraka}`)
+            cacheObject[authorDid] = { accept: true, time: Date.now() }
+            return {
+              uri: create.uri,
+              cid: create.cid,
+              indexedAt: new Date().toISOString(),
             }
-          })
-        }).on('error', (err) => {
-          console.error(`[❗❗] HTTP request failed for ${authorDid}:`, err)
-        })
-
-
-      })
-      .map((create) => {
-        return {
-          uri: create.uri,
-          cid: create.cid,
-          indexedAt: new Date().toISOString(),
+          } else {
+            // console.log(`[DENY] User denied: ${authorDid}, AKA: ${useraka}`)
+            cacheObject[authorDid] = { accept: false, time: Date.now() }
+            return null
+          }
+        } catch (err) {
+          console.error(`[❗❗] Error fetching info for ${authorDid}:`, err)
+          return null
         }
       })
+    )
+
+    // Filter out null values
+    const validPostsToCreate = postsToCreate.filter(
+      (post): post is { uri: string; cid: string; indexedAt: string } => post !== null
+    )
+
 
     if (postsToDelete.length > 0) {
       await this.db
@@ -111,12 +104,42 @@ export class FirehoseSubscription extends FirehoseSubscriptionBase {
         .where('uri', 'in', postsToDelete)
         .execute()
     }
-    if (postsToCreate.length > 0) {
+
+    if (validPostsToCreate.length > 0) {
       await this.db
         .insertInto('post')
-        .values(postsToCreate)
+        .values(validPostsToCreate)
         .onConflict((oc) => oc.doNothing())
         .execute()
     }
   }
+}
+
+async function fetchUserInfo(authorDid: string) {
+  return new Promise<any>((resolve, reject) => {
+    https.get(`https://plc.directory/${authorDid}`, (res) => {
+      if (res.statusCode != 200) {
+        console.log(`[HTTP] Response received for ${authorDid}. Status: ${res.statusCode}`)
+        return reject(new Error(`Failed to fetch user info`))
+      }
+
+      let data = ''
+      res.on('data', (chunk) => {
+        data += chunk
+      })
+
+      res.on('end', () => {
+        try {
+          const userinfo = JSON.parse(data)
+          resolve(userinfo)
+        } catch (err) {
+          console.error(`[❗❗] Failed to parse user info for ${authorDid}:`, err)
+          reject(err)
+        }
+      })
+    }).on('error', (err) => {
+      console.error(`[❗❗] HTTP request failed for ${authorDid}:`, err)
+      reject(err)
+    })
+  })
 }
